@@ -125,6 +125,108 @@ messages = OpenAIMessages.from_lcm(lcm)
 
 ---
 
+## Agent tools
+
+Register all tools with your agent via `engine.get_tool_schemas()` (OpenAI-format, works with every framework). Route calls to `engine.handle_tool_call(name, args, messages=messages)`.
+
+```python
+# Register with your agent
+tools = engine.get_tool_schemas()   # 26 tools total
+
+# Route tool calls (same pattern for any framework)
+result = engine.handle_tool_call(tool_name, args_dict, messages=messages)
+```
+
+### Memory tools
+
+```
+lcm_remember   Store a fact, decision, preference, or constraint that survives sessions.
+               key      (str)   dot-notation key: "decision.database", "constraint.no_prod_push"
+               value    (str)   the content to store
+               category (str)   "fact" | "preference" | "constraint" | "decision"
+               scope    (str)   "global" (all sessions) | "current" (this session only)
+               tags     (list)  topic tags for grouping, e.g. ["auth", "backend"]
+               related_keys (list)  other fact keys to link to
+               symbol   (str)   ★ pin to a code symbol — surfaces in lcm_lst_class next session
+
+lcm_recall     Retrieve stored facts.
+               key        exact key lookup
+               query      LIKE search across key + value
+               category   filter by category
+               tag        filter by tag — returns all facts with this tag
+               related_to traverse fact graph — returns facts linked to this key
+
+lcm_forget     Delete a fact by key.
+lcm_link       Bidirectionally link two facts (captures causal chains).
+```
+
+**Best practice:** call `lcm_recall()` (no args) at the start of every session to reload constraints and preferences. Call `lcm_recall(category="constraint")` before any state-modifying action.
+
+### History tools
+
+```
+lcm_grep           Full-text search (FTS5) across the entire message history —
+                   including compressed turns. Returns snippets with store_id + role.
+                   query      FTS5 search term
+                   session_id restrict to one session
+                   limit      default 20
+
+lcm_expand         Recover the original messages that were compressed into a DAG node.
+                   node_id    (int)  from the summary header shown in context
+                   max_tokens default 4000
+
+lcm_expand_query   Ask a question and synthesize an answer from compressed DAG history.
+                   query      what to look for
+                   max_tokens default 4000
+
+lcm_describe       Full DAG structure for the current session — depths, node counts,
+                   source token coverage, active context breakdown.
+
+lcm_status         Engine state: compression count, token pressure, store size, config.
+
+lcm_load_session   Load a past session's compressed context into the active context.
+
+lcm_semantic_search  Vector similarity search across nodes + facts (requires LCM_EMBEDDING_MODEL).
+                     content_type  "node" | "fact" | "all"
+```
+
+**Best practice:** when context pressure is high and the agent needs to recall something specific, prefer `lcm_expand_query("what was decided about X")` over `lcm_grep` — it synthesizes across multiple compressed nodes rather than returning raw snippets.
+
+### Salience pinning
+
+Prevent specific messages from ever being compressed away:
+
+```python
+# Auto-pin messages that match named patterns
+config.auto_pin_patterns = ["constraint", "error", "correction"]
+
+# Or pin manually
+engine.handle_tool_call("lcm_remember", {
+    "key": "session.critical_constraint",
+    "value": "Never drop the user's payment data even under compression",
+    "category": "constraint",
+    "scope": "global"
+})
+```
+
+### Semantic search (optional)
+
+```bash
+pip install sqlite-vec
+export LCM_EMBEDDING_MODEL=openai/text-embedding-3-small
+```
+
+```python
+# Finds "JWT 24h expiry" from query "auth token lifetime"
+engine.handle_tool_call("lcm_semantic_search", {
+    "query": "auth token lifetime",
+    "content_type": "all",   # searches both DAG nodes and facts
+    "limit": 10
+})
+```
+
+---
+
 ## Persistent memory (Fact Store)
 
 ```python
