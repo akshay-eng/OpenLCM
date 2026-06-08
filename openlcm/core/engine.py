@@ -234,6 +234,13 @@ class LCMEngine:
         self._lifecycle = LifecycleStateStore(resolved_db)
         self._facts = FactStore(resolved_db)
         self._embeddings = EmbeddingStore(resolved_db, embedding_model=self._config.embedding_model)
+        self._lst = None  # LSTGraph, attached via attach_lst() or auto-init from config
+        self._lst_repo_id: str = ""  # active repo_id for the attached LST
+        self._init_lst(resolved_db)
+
+        # Per-session file-read tracking: session_id → set of file paths read this session
+        # Populated by lcm_read_file tool; prevents redundant full-file reads
+        self._session_files_read: dict[str, set[str]] = {}
 
         # Session state
         self._session_id: str = ""
@@ -336,6 +343,174 @@ class LCMEngine:
     def _hermes_home(self) -> str:
         """Compatibility shim — tools.py uses this to locate externalized payloads."""
         return str(self._store.db_path.parent)
+
+    # ── LST (Lossless Semantic Tree) ──────────────────────────────────────
+
+    def _init_lst(self, resolved_db: str) -> None:
+        """Auto-attach LSTGraph when lst_enabled=True in config."""
+        if not getattr(self._config, "lst_enabled", False):
+            return
+        repo_path = getattr(self._config, "lst_repo_path", "")
+        if not repo_path:
+            return
+        try:
+            from ..code.graph import LSTGraph
+            from ..code.scanner import RepoScanner
+            self._lst = LSTGraph(resolved_db)
+            repo_id = getattr(self._config, "lst_repo_id", "default") or "default"
+            self._lst_repo_id = repo_id
+            logger.info("LSTGraph attached, scanning %s …", repo_path)
+            scanner = RepoScanner()
+            stats = scanner.scan(repo_path, self._lst, repo_id=repo_id)
+            logger.info("LST scan complete: %s", stats)
+        except Exception as exc:
+            logger.warning("LST auto-init failed: %s", exc)
+
+    def attach_lst(self, graph: Any, repo_id: str = "") -> None:
+        """Attach an LSTGraph instance so lcm_lst_* tools become available."""
+        self._lst = graph
+        if repo_id:
+            self._lst_repo_id = repo_id
+
+    # ── LST context helpers ────────────────────────────────────────────────
+
+    def get_lst_context(self, repo_id: str = "") -> str:
+        """Return the repo orientation block for this session.
+
+        Call this once at agent session start and include the result in your
+        system prompt or first user message. Gives the agent full structural
+        awareness of the codebase without reading any files.
+
+        Example::
+
+            engine.bind_session(session_id)
+            system_ctx = engine.get_lst_context()
+            # prepend to your system prompt or inject as first assistant message
+        """
+        if not self._lst:
+            return ""
+        from ..code.context import build_boot_context
+        rid = repo_id or self._lst_repo_id or "default"
+        try:
+            return build_boot_context(
+                self._lst, rid,
+                message_store=self._store,
+                dag=self._dag,
+            )
+        except Exception as exc:
+            logger.debug("get_lst_context failed: %s", exc)
+            return ""
+
+    def get_file_context(
+        self,
+        file_path: str,
+        repo_id: str = "",
+        *,
+        force_full: bool = False,
+        repo_root: str = "",
+    ) -> dict:
+        """Smart file read — returns full content on first access, compact LST view after.
+
+        Tracks which files have been "consumed" in the current session.
+        Subsequent reads of the same file return the LST structural summary
+        (~200 tokens) instead of the full file (~3000 tokens).
+
+        Returns dict with keys:
+          mode: "full" | "compact" | "not_indexed"
+          content: file text (mode=full) or LST summary (mode=compact)
+          file_path, session_id, already_seen
+        """
+        session_id = self._session_id or "__default__"
+        if session_id not in self._session_files_read:
+            self._session_files_read[session_id] = set()
+        seen = self._session_files_read[session_id]
+        already_seen = file_path in seen
+
+        rid = repo_id or self._lst_repo_id or "default"
+
+        # If already seen this session and LST available → compact view
+        if already_seen and self._lst and not force_full:
+            from ..code.context import build_file_context
+            compact = build_file_context(self._lst, file_path, rid, facts=self._facts)
+            return {
+                "mode": "compact",
+                "content": compact,
+                "file_path": file_path,
+                "session_id": session_id,
+                "already_seen": True,
+            }
+
+        # First time: try reading from disk
+        root = repo_root or getattr(self._config, "lst_repo_path", "") or ""
+        content = None
+        if root:
+            from pathlib import Path
+            full = Path(root) / file_path
+            if not full.exists():
+                full = Path(file_path)
+            if full.exists():
+                try:
+                    content = full.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    pass
+
+        if content is None:
+            # Not on disk or no repo root — fall back to LST compact view
+            if self._lst:
+                from ..code.context import build_file_context
+                compact = build_file_context(self._lst, file_path, rid, facts=self._facts)
+                seen.add(file_path)
+                return {
+                    "mode": "compact",
+                    "content": compact,
+                    "file_path": file_path,
+                    "session_id": session_id,
+                    "already_seen": already_seen,
+                }
+            return {
+                "mode": "not_indexed",
+                "content": f"File not found: {file_path}",
+                "file_path": file_path,
+                "session_id": session_id,
+                "already_seen": already_seen,
+            }
+
+        seen.add(file_path)
+        return {
+            "mode": "full",
+            "content": content,
+            "file_path": file_path,
+            "session_id": session_id,
+            "already_seen": already_seen,
+        }
+
+    def mark_file_seen(self, file_path: str, session_id: str = "") -> None:
+        """Mark a file as seen in the current session (call after any native file read)."""
+        sid = session_id or self._session_id or "__default__"
+        if sid not in self._session_files_read:
+            self._session_files_read[sid] = set()
+        self._session_files_read[sid].add(file_path)
+
+    def get_session_files_read(self, session_id: str = "") -> set[str]:
+        """Return the set of files read in the given (or current) session."""
+        sid = session_id or self._session_id or "__default__"
+        return set(self._session_files_read.get(sid, set()))
+
+    def _build_lst_context_injection(self) -> str | None:
+        """Build the LST repo orientation block for auto-injection into the system message."""
+        if not self._lst or not getattr(self._config, "lst_auto_inject", True):
+            return None
+        rid = self._lst_repo_id or "default"
+        try:
+            from ..code.context import build_boot_context
+            block = build_boot_context(
+                self._lst, rid,
+                message_store=self._store,
+                dag=self._dag,
+            )
+            return block if block else None
+        except Exception:
+            return None
 
     # ── Public event hook API ──────────────────────────────────────────────
 
@@ -598,6 +773,8 @@ class LCMEngine:
         _memory_injection: str | None = (
             self._build_memory_injection(messages) if self._config.auto_inject_memory else None
         )
+        # LST repo context injection — appended once per compress call when LST is attached
+        _lst_injection: str | None = self._build_lst_context_injection()
 
         # Step 1: Ingest new messages
         working_messages = self._ingest_messages(messages)
@@ -606,8 +783,10 @@ class LCMEngine:
         if force_overflow:
             leading_anchor_count = self._leading_anchor_count(working_messages)
             base_sys = working_messages[0] if leading_anchor_count else None
+            _injected_sys = self._apply_memory_injection(base_sys, _memory_injection)
+            _injected_sys = self._apply_memory_injection(_injected_sys, _lst_injection)
             compressed = self._assemble_overflow_recovery_context(
-                self._apply_memory_injection(base_sys, _memory_injection),
+                _injected_sys,
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
             )
@@ -752,8 +931,10 @@ class LCMEngine:
         # Step 7: Assemble new active context
         leading_anchor_count = self._leading_anchor_count(working_messages)
         base_sys = working_messages[0] if leading_anchor_count else None
+        _injected_sys = self._apply_memory_injection(base_sys, _memory_injection)
+        _injected_sys = self._apply_memory_injection(_injected_sys, _lst_injection)
         compressed = self._assemble_context(
-            self._apply_memory_injection(base_sys, _memory_injection),
+            _injected_sys,
             working_messages[leading_anchor_count:],
             assembly_cap_override=recovery_assembly_cap,
         )
@@ -1951,6 +2132,21 @@ class LCMEngine:
             "lcm_forget": lcm_tools.lcm_forget,
             "lcm_link": lcm_tools.lcm_link,
             "lcm_semantic_search": lcm_tools.lcm_semantic_search,
+            # LST (Lossless Semantic Tree) — structure
+            "lcm_lst_scan": lcm_tools.lcm_lst_scan,
+            "lcm_lst_find": lcm_tools.lcm_lst_find,
+            "lcm_lst_file": lcm_tools.lcm_lst_file,
+            "lcm_lst_class": lcm_tools.lcm_lst_class,
+            "lcm_lst_callers": lcm_tools.lcm_lst_callers,
+            "lcm_lst_callees": lcm_tools.lcm_lst_callees,
+            "lcm_lst_refs": lcm_tools.lcm_lst_refs,
+            "lcm_lst_path": lcm_tools.lcm_lst_path,
+            "lcm_lst_ancestors": lcm_tools.lcm_lst_ancestors,
+            "lcm_lst_descendants": lcm_tools.lcm_lst_descendants,
+            # LST — session integration
+            "lcm_lst_context": lcm_tools.lcm_lst_context,
+            "lcm_read_file": lcm_tools.lcm_read_file,
+            "lcm_lst_facts": lcm_tools.lcm_lst_facts,
         }
         handler = handlers.get(name)
         if handler:

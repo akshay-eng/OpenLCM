@@ -260,6 +260,17 @@ class LCMConfig:
     # Example: "openai/text-embedding-3-small"
     embedding_model: str = ""
 
+    # -- Lossless Semantic Tree (LST) ---
+    # When enabled, LCMEngine auto-scans lst_repo_path on init and attaches LSTGraph.
+    lst_enabled: bool = False
+    # Absolute path to the repository root to scan. Required when lst_enabled=True.
+    lst_repo_path: str = ""
+    # Logical repo identifier used to namespace the LST graph. Defaults to "default".
+    lst_repo_id: str = "default"
+    # Auto-inject repo orientation block into system message on every compress() call.
+    # Set to False if you prefer to call get_lst_context() manually.
+    lst_auto_inject: bool = True
+
     @classmethod
     def from_env(cls) -> "LCMConfig":
         """Build config from environment variables (LCM_ prefix)."""
@@ -363,6 +374,10 @@ class LCMConfig:
         if raw_auto_pin is not None:
             c.auto_pin_patterns = _parse_pattern_list(raw_auto_pin)
         c.embedding_model = _str("LCM_EMBEDDING_MODEL", c.embedding_model)
+        c.lst_enabled = _parse_bool_env("LCM_LST_ENABLED", c.lst_enabled)
+        c.lst_repo_path = _str("LCM_LST_REPO_PATH", c.lst_repo_path)
+        c.lst_repo_id = _str("LCM_LST_REPO_ID", c.lst_repo_id)
+        c.lst_auto_inject = _parse_bool_env("LCM_LST_AUTO_INJECT", c.lst_auto_inject)
 
         raw_ignore = os.environ.get("LCM_IGNORE_SESSION_PATTERNS")
         if raw_ignore is not None:

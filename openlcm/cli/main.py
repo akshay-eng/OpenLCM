@@ -32,6 +32,13 @@ app = typer.Typer(
     add_completion=False,
 )
 
+scan_app = typer.Typer(
+    name="scan",
+    help="Manage the Lossless Semantic Tree (LST) codebase graph.",
+    add_completion=False,
+)
+app.add_typer(scan_app, name="scan")
+
 _DEFAULT_DB = str(Path.home() / ".openlcm" / "lcm.db")
 
 
@@ -309,6 +316,412 @@ def viz(
 
     app = create_app(engine)
     serve(app, host=host, port=port, open_browser=not no_browser)
+
+
+# ── scan subcommands ─────────────────────────────────────────────────────────
+
+def _open_lst(db: str) -> "LSTGraph":
+    from openlcm.code.graph import LSTGraph
+    return LSTGraph(_resolve_db(db))
+
+
+def _scan_with_progress(scanner, path: str, graph, kwargs: dict) -> dict:
+    """Run scanner.scan() with a rich live progress display."""
+    try:
+        from rich.progress import (
+            Progress, SpinnerColumn, TextColumn,
+            MofNCompleteColumn, TimeElapsedColumn,
+        )
+        from rich.console import Console
+        _rich = True
+    except ImportError:
+        _rich = False
+
+    if not _rich:
+        return scanner.scan(path, graph, **kwargs)
+
+    console = Console()
+    parsed = 0
+    skipped = 0
+    _status_text = ["Initializing..."]
+
+    def _truncate(s: str, n: int = 55) -> str:
+        return s if len(s) <= n else "…" + s[-(n - 1):]
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task(_status_text[0], total=None)
+
+        def on_progress(event: str, data: dict) -> None:
+            nonlocal parsed, skipped
+            if event == "clone_start":
+                url = data.get("url", "")
+                progress.update(task, description=f"Cloning {_truncate(url, 60)}...")
+            elif event == "clone_done":
+                cached = " (cached)" if data.get("was_cached") else " (fresh)"
+                progress.update(task, description=f"Cloned{cached}")
+            elif event == "phase_start":
+                phase = data.get("phase", "")
+                if phase == "python":
+                    progress.update(task, description="Scanning Python files...")
+                elif phase == "ctags":
+                    progress.update(task, description="Running ctags (multi-language)...")
+            elif event == "file_scan":
+                parsed += 1
+                lang = data.get("lang", "")
+                rel = _truncate(data.get("path", ""))
+                progress.update(
+                    task,
+                    description=f"[cyan]{lang}[/]  {rel}  "
+                                f"[dim]parsed={parsed}  skipped={skipped}[/]",
+                )
+            elif event == "file_skip":
+                skipped += 1
+                rel = _truncate(data.get("path", ""))
+                progress.update(
+                    task,
+                    description=f"[dim]skip  {rel}  parsed={parsed}  skipped={skipped}[/]",
+                )
+            elif event == "file_error":
+                rel = _truncate(data.get("path", ""))
+                progress.update(task, description=f"[red]error[/]  {rel}")
+            elif event == "ctags_files":
+                n = data.get("count", 0)
+                progress.update(task, description=f"ctags: processing {n} files...")
+
+        stats = scanner.scan(path, graph, **kwargs, on_progress=on_progress)
+
+    return stats
+
+
+@scan_app.command("repo")
+def scan_repo(
+    path: str = typer.Argument(..., help="Local path or remote URL (GitHub, GitLab, etc.)"),
+    repo_id: str = typer.Option("", "--repo-id", "-r", help="Logical repo identifier (auto-derived from URL if omitted)"),
+    db: str = _db_option(),
+    force: bool = typer.Option(False, "--force", "-f", help="Re-parse all files (ignore hash cache)"),
+    branch: str = typer.Option("", "--branch", "-b", help="Branch or tag to clone (default: remote HEAD)"),
+    depth: int = typer.Option(1, "--depth", help="Clone depth for remote repos (0 = full history)"),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Suppress progress output"),
+):
+    """
+    Scan a repository and build the Lossless Semantic Tree (LST).
+
+    Accepts local paths or remote URLs:
+
+        openlcm scan repo /path/to/myapp
+        openlcm scan repo https://github.com/user/repo
+        openlcm scan repo https://github.com/user/repo --branch develop
+        openlcm scan repo git@github.com:user/repo.git --repo-id myrepo
+
+    Remote repos are cloned to ~/.openlcm/repos/ and cached — repeated scans
+    only re-parse files that changed.
+    """
+    from openlcm.code.graph import LSTGraph
+    from openlcm.code.scanner import RepoScanner
+    from openlcm.code.git import is_url
+
+    db_path = _resolve_db(db)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    is_remote = is_url(path)
+
+    if not quiet:
+        typer.echo(f"\nOpenLCM LST Scan")
+        typer.echo(f"  Source:   {'[remote] ' if is_remote else ''}{path}")
+        if repo_id:
+            typer.echo(f"  Repo ID:  {repo_id}")
+        typer.echo(f"  Database: {db_path}")
+        typer.echo(f"  Mode:     {'force (re-parse all)' if force else 'incremental'}")
+        if is_remote:
+            typer.echo(f"  Cache:    ~/.openlcm/repos/")
+        typer.echo("")
+
+    graph = LSTGraph(str(db_path))
+    scanner = RepoScanner()
+
+    kwargs: dict = dict(
+        repo_id=repo_id or "default",
+        force=force,
+    )
+    if is_remote:
+        kwargs["branch"] = branch or None
+        kwargs["clone_depth"] = depth
+
+    if not quiet:
+        stats = _scan_with_progress(scanner, path, graph, kwargs)
+    else:
+        stats = scanner.scan(path, graph, **kwargs)
+
+    if "error" in stats:
+        typer.echo(f"Error: {stats['error']}", err=True)
+        raise typer.Exit(1)
+
+    # Show language breakdown
+    langs = stats.get("languages", {})
+    lang_str = "  ".join(f"{lang}={n}" for lang, n in sorted(langs.items(), key=lambda x: -x[1]))
+
+    typer.echo(f"  Scanned:   {stats['scanned']} files  ({stats['skipped']} skipped, {stats.get('errors',0)} errors)")
+    typer.echo(f"  Languages: {lang_str or '—'}")
+    typer.echo(f"  Symbols:   {stats['symbols']:,}")
+    typer.echo(f"  Edges:     {stats['edges']:,}")
+    typer.echo(f"  Time:      {stats['elapsed_s']:.2f}s")
+
+    git = stats.get("git", {})
+    if git.get("commit_hash"):
+        typer.echo(f"\n  Git:")
+        typer.echo(f"    Branch:  {git.get('branch','—')}")
+        typer.echo(f"    Commit:  {git.get('commit_hash','')[:12]}  {git.get('commit_message','')[:60]}")
+        if git.get("origin_url"):
+            typer.echo(f"    Origin:  {git.get('origin_url')}")
+
+    if is_remote:
+        typer.echo(f"\n  Cached at: {stats.get('local_path','')}")
+
+    typer.echo(f"\n  Run 'openlcm scan status' to see the full index.")
+    typer.echo(f"  Run 'openlcm scan export output.lcmgraph' to export for sharing.\n")
+
+
+@scan_app.command("status")
+def scan_status(
+    repo_id: str = typer.Option("", "--repo-id", "-r", help="Repo identifier (default: show all repos)"),
+    db: str = _db_option(),
+):
+    """Show LST graph stats. Without --repo-id shows all scanned repos."""
+    from openlcm.code.graph import LSTGraph
+    import datetime
+
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        typer.echo(f"No database at {db_path}. Run 'openlcm scan repo <path>' first.")
+        raise typer.Exit(0)
+
+    graph = LSTGraph(str(db_path))
+
+    if not repo_id:
+        # Show all repos
+        repos = graph.list_repos()
+        if not repos:
+            typer.echo("No repos scanned yet. Run 'openlcm scan repo <path>'.")
+            raise typer.Exit(0)
+        typer.echo(f"\nOpenLCM LST — {len(repos)} repo(s) in {db_path}\n")
+        for repo in repos:
+            rid = repo["repo_id"]
+            stats = graph.get_stats(rid)
+            ts = repo.get("last_scanned", 0)
+            scanned = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "—"
+            typer.echo(f"  ● {rid}")
+            if repo.get("origin_url"):
+                typer.echo(f"    URL:     {repo['origin_url']}")
+            if repo.get("branch"):
+                typer.echo(f"    Branch:  {repo['branch']}  commit: {repo.get('commit_hash','')[:12]}")
+            typer.echo(f"    Files:   {stats['files']:,}  Symbols: {stats['symbols']:,}  Edges: {stats['edges']:,}")
+            typer.echo(f"    Scanned: {scanned}")
+            typer.echo("")
+        return
+
+    stats = graph.get_stats(repo_id, include_repo_meta=True)
+    files = graph.list_files(repo_id, limit=10)
+
+    typer.echo(f"\nOpenLCM LST Status — repo_id={repo_id}")
+    typer.echo(f"  Database: {db_path}")
+    typer.echo(f"  Files:    {stats['files']:,}")
+    typer.echo(f"  Symbols:  {stats['symbols']:,}")
+    typer.echo(f"  Edges:    {stats['edges']:,}")
+
+    git = stats.get("git", {})
+    if git:
+        if git.get("origin_url"):
+            typer.echo(f"  Origin:   {git['origin_url']}")
+        if git.get("branch"):
+            typer.echo(f"  Branch:   {git['branch']}  commit: {git.get('commit_hash','')[:12]}")
+
+    if files:
+        typer.echo(f"\n  Files (sample):")
+        for f in files[:8]:
+            ts = f.get("last_scanned", 0)
+            scanned = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "—"
+            typer.echo(f"    {f['file_path']:<55} {scanned}")
+    typer.echo("")
+
+
+@scan_app.command("export")
+def scan_export(
+    output: str = typer.Argument(..., help="Output file path (e.g. myapp.lcmgraph)"),
+    repo_id: str = typer.Option("default", "--repo-id", "-r", help="Repo to export"),
+    repo_path: str = typer.Option("", "--repo-path", help="Informational repo path to embed in export"),
+    db: str = _db_option(),
+    no_compress: bool = typer.Option(False, "--no-compress", help="Write plain JSON instead of gzip"),
+):
+    """
+    Export the LST graph as a portable .lcmgraph file.
+
+    The exported file is self-contained and can be imported into any
+    OpenLCM database — on another machine, by another agent, or shared
+    across sessions.
+
+    Example:
+        openlcm scan export myapp.lcmgraph
+        openlcm scan export myapp.lcmgraph --repo-id myapp
+    """
+    from openlcm.code.graph import LSTGraph
+
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        typer.echo(f"No database at {db_path}. Run 'openlcm scan repo <path>' first.")
+        raise typer.Exit(1)
+
+    graph = LSTGraph(str(db_path))
+    result = graph.export_graph(
+        output,
+        repo_id=repo_id,
+        repo_path=repo_path,
+        compress=not no_compress,
+    )
+
+    if "error" in result:
+        typer.echo(f"Error: {result['error']}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"\nExported LST graph:")
+    typer.echo(f"  File:    {result['path']}")
+    typer.echo(f"  Size:    {result['size_kb']:.1f} KB {'(gzipped)' if not no_compress else '(plain JSON)'}")
+    typer.echo(f"  Files:   {result['files']:,}")
+    typer.echo(f"  Symbols: {result['symbols']:,}")
+    typer.echo(f"  Edges:   {result['edges']:,}")
+    typer.echo(f"\n  Share this file with any agent or import into another session:")
+    typer.echo(f"  openlcm scan import {result['path']}\n")
+
+
+@scan_app.command("import")
+def scan_import(
+    input_file: str = typer.Argument(..., help="Path to the .lcmgraph file to import"),
+    repo_id: str = typer.Option("", "--repo-id", "-r", help="Override repo_id from file"),
+    db: str = _db_option(),
+):
+    """
+    Import a portable .lcmgraph file into the local LST database.
+
+    After import, all lcm_lst_* agent tools can query the imported graph.
+    Idempotent — safe to re-import the same file.
+
+    Example:
+        openlcm scan import myapp.lcmgraph
+        openlcm scan import myapp.lcmgraph --repo-id myapp --db /tmp/test.db
+    """
+    from openlcm.code.graph import LSTGraph
+
+    input_path = Path(input_file).expanduser().resolve()
+    if not input_path.exists():
+        typer.echo(f"File not found: {input_path}", err=True)
+        raise typer.Exit(1)
+
+    db_path = _resolve_db(db)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    graph = LSTGraph(str(db_path))
+    result = graph.import_graph(str(input_path), target_repo_id=repo_id or None)
+
+    if "error" in result:
+        typer.echo(f"Error: {result['error']}", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"\nImported LST graph:")
+    typer.echo(f"  Database: {db_path}")
+    typer.echo(f"  Repo ID:  {result['repo_id']}")
+    typer.echo(f"  Files:    {result['files']:,}")
+    typer.echo(f"  Symbols:  {result['symbols']:,}")
+    typer.echo(f"  Edges:    {result['edges']:,}")
+    typer.echo(f"  Exported: {result.get('exported_at','—')}")
+    typer.echo(f"\n  Agents can now use lcm_lst_* tools against this graph.\n")
+
+
+@scan_app.command("visualize")
+def scan_visualize(
+    repo_id: str = typer.Option("", "--repo-id", "-r", help="Repo to visualize (default: auto-detect)"),
+    db: str = _db_option(),
+    output: str = typer.Option("", "--output", "-o", help="HTML output path (default: <repo_id>_graph.html)"),
+    terminal: bool = typer.Option(False, "--terminal", "-t", help="Show rich tree in terminal instead of generating HTML"),
+    max_symbols: int = typer.Option(2000, "--max-symbols", help="Max symbols to include in graph"),
+    max_edges: int = typer.Option(5000, "--max-edges", help="Max edges to include in graph"),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open HTML in browser after generating"),
+):
+    """
+    Visualize the scanned repository as an interactive graph.
+
+    Terminal mode shows a rich file/symbol tree.
+    Default mode generates a self-contained HTML file with a D3.js force-directed
+    graph — all nodes, edges, and metadata; no AI-generated markup.
+
+        openlcm scan visualize                        # HTML, opens browser
+        openlcm scan visualize --terminal             # Rich tree in terminal
+        openlcm scan visualize --output myapp.html    # HTML to specific path
+        openlcm scan visualize --repo-id myapp        # specific repo
+    """
+    from openlcm.code.graph import LSTGraph
+    from openlcm.code.visualize import build_graph_data, render_html, render_terminal
+
+    db_path = _resolve_db(db)
+    if not db_path.exists():
+        typer.echo(f"No database at {db_path}. Run 'openlcm scan repo <path>' first.")
+        raise typer.Exit(1)
+
+    graph = LSTGraph(str(db_path))
+
+    # Auto-detect repo_id if not provided
+    if not repo_id:
+        repos = graph.list_repos()
+        if not repos:
+            typer.echo("No repos scanned yet. Run 'openlcm scan repo <path>' first.")
+            raise typer.Exit(1)
+        if len(repos) == 1:
+            repo_id = repos[0]["repo_id"]
+        else:
+            typer.echo(f"Multiple repos found — pick one with --repo-id:\n")
+            for r in repos:
+                typer.echo(f"  {r['repo_id']}")
+            typer.echo("")
+            raise typer.Exit(1)
+
+    stats = graph.get_stats(repo_id)
+    if stats["files"] == 0:
+        repos = graph.list_repos()
+        hint = f"  Available: {', '.join(r['repo_id'] for r in repos)}" if repos else ""
+        typer.echo(f"No data for repo_id='{repo_id}'.{hint}")
+        raise typer.Exit(1)
+
+    if terminal:
+        render_terminal(graph, repo_id)
+        return
+
+    # HTML output
+    out_path = output or f"{repo_id.replace('/', '-').replace('--', '_')}_graph.html"
+    typer.echo(f"\nBuilding graph data for '{repo_id}'…")
+
+    data = build_graph_data(graph, repo_id, max_symbols=max_symbols, max_edges=max_edges)
+
+    if data.get("truncated"):
+        typer.echo(
+            f"  [!] Large repo — showing {len(data['nodes'])} nodes / {len(data['edges'])} edges "
+            f"(use --max-symbols / --max-edges to adjust)"
+        )
+
+    render_html(data, out_path)
+    size_kb = Path(out_path).stat().st_size / 1024
+
+    typer.echo(f"  Nodes:  {len(data['nodes']):,}  ({stats['symbols']:,} total symbols)")
+    typer.echo(f"  Edges:  {len(data['edges']):,}  ({stats['edges']:,} total edges)")
+    typer.echo(f"  Output: {Path(out_path).resolve()}  ({size_kb:.0f} KB)\n")
+
+    if open_browser:
+        import webbrowser
+        webbrowser.open(f"file://{Path(out_path).resolve()}")
+
 
 
 def main():

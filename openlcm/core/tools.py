@@ -1894,6 +1894,19 @@ def lcm_remember(args: Dict[str, Any], **kwargs) -> str:
         else:
             related_keys = []
 
+    # Symbol pinning — auto-add an lst.<repo_id>.<symbol> tag so the fact
+    # surfaces whenever that symbol is queried via lcm_lst_class / lcm_lst_facts
+    symbol = str(args.get("symbol") or "").strip()
+    if symbol:
+        repo_id = str(args.get("repo_id") or "").strip()
+        if not repo_id:
+            repo_id = getattr(engine, "_lst_repo_id", "") or "default"
+        symbol_tag = f"lst.{repo_id}.{symbol}"
+        if tags is None:
+            tags = [symbol_tag]
+        elif symbol_tag not in tags:
+            tags = list(tags) + [symbol_tag]
+
     result = facts.remember(
         key,
         value,
@@ -1903,6 +1916,9 @@ def lcm_remember(args: Dict[str, Any], **kwargs) -> str:
         related_keys=related_keys,
         source_session_id=engine.current_session_id,
     )
+
+    if symbol:
+        result["symbol_pinned"] = symbol
 
     # Embed the new/updated fact value asynchronously
     emb = getattr(engine, "_embeddings", None)
@@ -2103,10 +2119,337 @@ def get_tool_schemas() -> list:
         LCM_EXPAND, LCM_EXPAND_QUERY, LCM_STATUS, LCM_DOCTOR,
         LCM_REMEMBER, LCM_RECALL, LCM_FORGET,
         LCM_LINK, LCM_SEMANTIC_SEARCH,
+        LCM_LST_SCAN, LCM_LST_FIND, LCM_LST_FILE,
+        LCM_LST_CLASS, LCM_LST_CALLERS, LCM_LST_CALLEES, LCM_LST_REFS,
+        LCM_LST_PATH, LCM_LST_ANCESTORS, LCM_LST_DESCENDANTS,
+        LCM_LST_CONTEXT, LCM_READ_FILE, LCM_LST_FACTS,
     )
     return [
         LCM_GREP, LCM_LOAD_SESSION, LCM_DESCRIBE,
         LCM_EXPAND, LCM_EXPAND_QUERY, LCM_STATUS, LCM_DOCTOR,
         LCM_REMEMBER, LCM_RECALL, LCM_FORGET,
         LCM_LINK, LCM_SEMANTIC_SEARCH,
+        # LST — structure
+        LCM_LST_SCAN, LCM_LST_FIND, LCM_LST_FILE,
+        LCM_LST_CLASS, LCM_LST_CALLERS, LCM_LST_CALLEES, LCM_LST_REFS,
+        LCM_LST_PATH, LCM_LST_ANCESTORS, LCM_LST_DESCENDANTS,
+        # LST — session integration
+        LCM_LST_CONTEXT, LCM_READ_FILE, LCM_LST_FACTS,
     ]
+
+
+# ── LST tool handlers ─────────────────────────────────────────────────────────
+
+def _require_lst(kwargs: dict) -> Any:
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return None
+    lst = getattr(engine, "_lst", None)
+    return lst
+
+
+def lcm_lst_scan(args: Dict[str, Any], **kwargs) -> str:
+    engine = _require_engine(kwargs)
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+
+    lst = getattr(engine, "_lst", None)
+    if lst is None:
+        return json.dumps({"error": "LST not attached — call engine.attach_lst(LSTGraph(...)) first"})
+
+    repo_path = str(args.get("repo_path") or "").strip()
+    if not repo_path:
+        return json.dumps({"error": "repo_path is required"})
+
+    repo_id = str(args.get("repo_id") or "default").strip() or "default"
+    force = bool(args.get("force", False))
+
+    try:
+        from ..code.scanner import RepoScanner
+        scanner = RepoScanner()
+        stats = scanner.scan(repo_path, lst, repo_id=repo_id, force=force)
+        return json.dumps({"status": "ok", "repo_id": repo_id, "repo_path": repo_path, **stats})
+    except Exception as exc:
+        logger.exception("lcm_lst_scan error")
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_find(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    name = str(args.get("name") or "").strip()
+    if not name:
+        return json.dumps({"error": "name is required"})
+
+    kind = str(args.get("kind") or "").strip() or None
+    file_filter = str(args.get("file") or "").strip() or None
+    repo_id = str(args.get("repo_id") or "default").strip() or "default"
+    limit = min(int(args.get("limit") or 10), 100)
+
+    try:
+        results = lst.find_symbol(name, kind=kind, file=file_filter, limit=limit)
+        # Filter by repo_id
+        results = [r for r in results if r.get("repo_id", "default") == repo_id or "repo_id" not in r]
+        return json.dumps({"query": name, "total": len(results), "results": results})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_file(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    file_path = str(args.get("file_path") or "").strip()
+    if not file_path:
+        return json.dumps({"error": "file_path is required"})
+
+    repo_id = str(args.get("repo_id") or "default").strip() or "default"
+
+    try:
+        symbols = lst.get_file_symbols(file_path, repo_id=repo_id)
+        if not symbols:
+            return json.dumps({
+                "file_path": file_path,
+                "total": 0,
+                "symbols": [],
+                "hint": "File not found in LST. Run lcm_lst_scan first, or check the path.",
+            })
+        return json.dumps({"file_path": file_path, "total": len(symbols), "symbols": symbols})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_class(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    class_name = str(args.get("class_name") or "").strip()
+    if not class_name:
+        return json.dumps({"error": "class_name is required"})
+
+    engine = kwargs.get("engine")
+    repo_id = str(args.get("repo_id") or "").strip()
+    if not repo_id:
+        repo_id = (getattr(engine, "_lst_repo_id", "") or "default")
+
+    try:
+        result = lst.get_class(class_name, repo_id=repo_id)
+        # Surface any facts pinned to this class from previous sessions
+        facts = getattr(engine, "_facts", None) if engine else None
+        if facts is not None:
+            tag = f"lst.{repo_id}.{class_name}"
+            try:
+                pinned = facts.recall_query(tag, limit=10)
+                if pinned:
+                    result["pinned_facts"] = [
+                        {"key": f["key"], "value": f["value"], "category": f["category"]}
+                        for f in pinned
+                    ]
+            except Exception:
+                pass
+        return json.dumps(result)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_callers(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    function_name = str(args.get("function_name") or "").strip()
+    if not function_name:
+        return json.dumps({"error": "function_name is required"})
+
+    limit = min(int(args.get("limit") or 20), 100)
+
+    try:
+        results = lst.get_callers(function_name, limit=limit)
+        return json.dumps({"function": function_name, "total": len(results), "callers": results})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_callees(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    function_name = str(args.get("function_name") or "").strip()
+    if not function_name:
+        return json.dumps({"error": "function_name is required"})
+
+    limit = min(int(args.get("limit") or 20), 100)
+
+    try:
+        results = lst.get_callees(function_name, limit=limit)
+        return json.dumps({"function": function_name, "total": len(results), "callees": results})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_refs(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    symbol_name = str(args.get("symbol_name") or "").strip()
+    if not symbol_name:
+        return json.dumps({"error": "symbol_name is required"})
+
+    limit = min(int(args.get("limit") or 30), 200)
+
+    try:
+        results = lst.get_refs(symbol_name, limit=limit)
+        return json.dumps({"symbol": symbol_name, "total": len(results), "refs": results})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_path(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    from_func = str(args.get("from_func") or "").strip()
+    to_func = str(args.get("to_func") or "").strip()
+    if not from_func or not to_func:
+        return json.dumps({"error": "from_func and to_func are required"})
+
+    repo_id = str(args.get("repo_id") or "default").strip() or "default"
+
+    try:
+        result = lst.get_path(from_func, to_func, repo_id=repo_id)
+        return json.dumps(result)
+    except ImportError:
+        return json.dumps({"error": "networkx not installed — pip install networkx"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_ancestors(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    symbol_name = str(args.get("symbol_name") or "").strip()
+    if not symbol_name:
+        return json.dumps({"error": "symbol_name is required"})
+
+    depth = min(int(args.get("depth") or 5), 10)
+    repo_id = str(args.get("repo_id") or "default").strip() or "default"
+
+    try:
+        result = lst.get_ancestors(symbol_name, depth=depth, repo_id=repo_id)
+        return json.dumps(result)
+    except ImportError:
+        return json.dumps({"error": "networkx not installed — pip install networkx"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_descendants(args: Dict[str, Any], **kwargs) -> str:
+    lst = _require_lst(kwargs)
+    if lst is None:
+        return json.dumps({"error": "LST not available"})
+
+    symbol_name = str(args.get("symbol_name") or "").strip()
+    if not symbol_name:
+        return json.dumps({"error": "symbol_name is required"})
+
+    depth = min(int(args.get("depth") or 5), 10)
+    repo_id = str(args.get("repo_id") or "default").strip() or "default"
+
+    try:
+        result = lst.get_descendants(symbol_name, depth=depth, repo_id=repo_id)
+        return json.dumps(result)
+    except ImportError:
+        return json.dumps({"error": "networkx not installed — pip install networkx"})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+def lcm_lst_context(args: Dict[str, Any], **kwargs) -> str:
+    """Return the full repo orientation context block."""
+    engine = kwargs.get("engine")
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+    repo_id = str(args.get("repo_id") or "").strip()
+    ctx = engine.get_lst_context(repo_id=repo_id)
+    if not ctx:
+        lst = getattr(engine, "_lst", None)
+        if lst is None:
+            return json.dumps({"error": "LST not attached. Call openlcm scan repo <path> first."})
+        return json.dumps({"error": "No repos indexed yet. Run lcm_lst_scan first."})
+    return json.dumps({"context": ctx})
+
+
+def lcm_read_file(args: Dict[str, Any], **kwargs) -> str:
+    """Smart file read with session deduplication via LST."""
+    engine = kwargs.get("engine")
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+
+    file_path = str(args.get("file_path") or "").strip()
+    if not file_path:
+        return json.dumps({"error": "file_path is required"})
+
+    repo_id = str(args.get("repo_id") or "").strip()
+    force_full = bool(args.get("force_full", False))
+    repo_root = str(args.get("repo_root") or "").strip()
+
+    result = engine.get_file_context(
+        file_path,
+        repo_id=repo_id,
+        force_full=force_full,
+        repo_root=repo_root,
+    )
+    return json.dumps(result)
+
+
+def lcm_lst_facts(args: Dict[str, Any], **kwargs) -> str:
+    """Query all facts pinned to a specific symbol."""
+    engine = kwargs.get("engine")
+    if engine is None:
+        return json.dumps({"error": "LCM engine not initialized"})
+
+    facts = getattr(engine, "_facts", None)
+    if facts is None:
+        return json.dumps({"error": "Fact store not available"})
+
+    symbol = str(args.get("symbol") or "").strip()
+    if not symbol:
+        return json.dumps({"error": "symbol is required"})
+
+    repo_id = str(args.get("repo_id") or "").strip()
+    if not repo_id:
+        repo_id = getattr(engine, "_lst_repo_id", "") or "default"
+
+    tag = f"lst.{repo_id}.{symbol}"
+    try:
+        pinned = facts.recall_query(tag, limit=50)
+        return json.dumps({
+            "symbol": symbol,
+            "repo_id": repo_id,
+            "total": len(pinned),
+            "facts": [
+                {
+                    "key": f["key"],
+                    "value": f["value"],
+                    "category": f["category"],
+                    "updated_at": f.get("updated_at"),
+                    "source_session_id": f.get("source_session_id"),
+                }
+                for f in pinned
+            ],
+            "hint": (
+                "No facts pinned to this symbol yet. "
+                "Use lcm_remember(key, value, symbol='SymbolName') to pin discoveries."
+            ) if not pinned else None,
+        })
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})

@@ -76,5 +76,11 @@ from .core.config import LCMConfig
 from .backends.base import SummaryBackend
 from .backends.callable import CallableBackend
 
+try:
+    from .code.graph import LSTGraph
+    from .code.scanner import RepoScanner
+    __all__ = ["LCMEngine", "LCMConfig", "SummaryBackend", "CallableBackend", "LSTGraph", "RepoScanner"]
+except Exception:  # pragma: no cover
+    __all__ = ["LCMEngine", "LCMConfig", "SummaryBackend", "CallableBackend"]
+
 __version__ = "0.1.0"
-__all__ = ["LCMEngine", "LCMConfig", "SummaryBackend", "CallableBackend"]

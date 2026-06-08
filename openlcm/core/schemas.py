@@ -335,6 +335,21 @@ LCM_REMEMBER = {
                     "Use lcm_link for bidirectional linking after both facts exist."
                 ),
             },
+            "symbol": {
+                "type": "string",
+                "description": (
+                    "Optional symbol name to pin this fact to (e.g. 'LCMEngine', 'compress', "
+                    "'PaymentService.charge'). When set, this fact will surface automatically "
+                    "whenever that symbol is queried via lcm_lst_class, lcm_lst_file, or "
+                    "lcm_lst_facts in any future session. Use this to preserve code discoveries "
+                    "across sessions — e.g. 'there is a race condition in this method'."
+                ),
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo the symbol belongs to (auto-detected if omitted).",
+                "default": "",
+            },
         },
         "required": ["key", "value"],
     },
@@ -506,5 +521,372 @@ LCM_EXPAND_QUERY = {
             },
         },
         "required": ["prompt"],
+    },
+}
+
+# ── Lossless Semantic Tree (LST) tools ────────────────────────────────────────
+
+LCM_LST_SCAN = {
+    "name": "lcm_lst_scan",
+    "description": (
+        "Scan a repository and build the Lossless Semantic Tree (LST) — a complete graph of every "
+        "file, class, function, method, import, and call relationship. "
+        "Idempotent: unchanged files are skipped on re-scan. "
+        "Run this once before using any other lcm_lst_* tools. "
+        "For large repos the scan runs incrementally — you can start querying immediately while it continues."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "repo_path": {
+                "type": "string",
+                "description": "Absolute path to the repository root to scan.",
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Logical identifier for this repo (default 'default'). Use a short slug when managing multiple repos.",
+                "default": "default",
+            },
+            "force": {
+                "type": "boolean",
+                "description": "Re-parse all files even if their hash is unchanged (default false).",
+                "default": False,
+            },
+        },
+        "required": ["repo_path"],
+    },
+}
+
+LCM_LST_FIND = {
+    "name": "lcm_lst_find",
+    "description": (
+        "Find symbols (classes, functions, methods, imports, variables) by name in the LST. "
+        "Uses FTS5 full-text search on name, qualified name, docstring, and signature. "
+        "Returns symbol metadata including file path, line numbers, and signature — "
+        "agents should use this to locate a symbol before drilling into details."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Symbol name or keyword to search for.",
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["class", "function", "method", "import", "variable"],
+                "description": "Filter by symbol kind (optional).",
+            },
+            "file": {
+                "type": "string",
+                "description": "Filter results to a specific file path substring (optional).",
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (default 'default').",
+                "default": "default",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max results (default 10, max 100).",
+                "default": 10,
+            },
+        },
+        "required": ["name"],
+    },
+}
+
+LCM_LST_FILE = {
+    "name": "lcm_lst_file",
+    "description": (
+        "List all symbols defined in a specific file — classes, functions, methods, imports. "
+        "Returns them ordered by line number. Use this to understand a file's structure "
+        "without reading its full source."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Repo-relative file path (e.g. 'src/auth/service.py').",
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (default 'default').",
+                "default": "default",
+            },
+        },
+        "required": ["file_path"],
+    },
+}
+
+LCM_LST_CLASS = {
+    "name": "lcm_lst_class",
+    "description": (
+        "Get a class definition from the LST: its docstring, base classes, decorators, "
+        "and all method signatures with their own docstrings. "
+        "Returns enough information to understand what the class does and how to call it "
+        "without reading the source file."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "class_name": {
+                "type": "string",
+                "description": "Simple class name (e.g. 'PaymentService', not the full qualified name).",
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (default 'default').",
+                "default": "default",
+            },
+        },
+        "required": ["class_name"],
+    },
+}
+
+LCM_LST_CALLERS = {
+    "name": "lcm_lst_callers",
+    "description": (
+        "Find all functions/methods that call a given function name. "
+        "Returns the caller's name, kind, file path, and line number. "
+        "Useful for impact analysis: 'if I change X, what else will break?'"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "function_name": {
+                "type": "string",
+                "description": "Simple function or method name to find callers of.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max results (default 20, max 100).",
+                "default": 20,
+            },
+        },
+        "required": ["function_name"],
+    },
+}
+
+LCM_LST_CALLEES = {
+    "name": "lcm_lst_callees",
+    "description": (
+        "Find all functions/methods called by a given function. "
+        "Returns the callee names, resolved symbols where possible, and their file locations. "
+        "Useful for understanding a function's dependencies."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "function_name": {
+                "type": "string",
+                "description": "Simple function or method name to inspect.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max results (default 20, max 100).",
+                "default": 20,
+            },
+        },
+        "required": ["function_name"],
+    },
+}
+
+LCM_LST_REFS = {
+    "name": "lcm_lst_refs",
+    "description": (
+        "Find all references to a symbol name across the codebase — calls, imports, and inheritance. "
+        "Returns the referencing symbol, its file, and the edge type. "
+        "Useful for understanding how widely a symbol is used before modifying or deleting it."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "symbol_name": {
+                "type": "string",
+                "description": "Symbol name to search for references to.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max results (default 30, max 200).",
+                "default": 30,
+            },
+        },
+        "required": ["symbol_name"],
+    },
+}
+
+LCM_LST_PATH = {
+    "name": "lcm_lst_path",
+    "description": (
+        "Find the shortest call path between two symbols in the codebase graph using networkx. "
+        "Returns the chain of function calls that connects from_func to to_func. "
+        "Requires networkx: pip install networkx. "
+        "Use this for impact analysis: 'how does control flow from main() reach PaymentService.charge()?'"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "from_func": {
+                "type": "string",
+                "description": "Starting symbol name (function, method, or class).",
+            },
+            "to_func": {
+                "type": "string",
+                "description": "Target symbol name.",
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (default 'default').",
+                "default": "default",
+            },
+        },
+        "required": ["from_func", "to_func"],
+    },
+}
+
+LCM_LST_ANCESTORS = {
+    "name": "lcm_lst_ancestors",
+    "description": (
+        "Find all symbols that transitively call a given symbol (up to N hops). "
+        "Uses networkx graph traversal on the in-memory codebase graph. "
+        "Requires networkx: pip install networkx. "
+        "Use this to find everything that depends on a symbol before modifying it."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "symbol_name": {
+                "type": "string",
+                "description": "Symbol to find ancestors of.",
+            },
+            "depth": {
+                "type": "integer",
+                "description": "Max number of hops to traverse (default 5).",
+                "default": 5,
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (default 'default').",
+                "default": "default",
+            },
+        },
+        "required": ["symbol_name"],
+    },
+}
+
+LCM_LST_DESCENDANTS = {
+    "name": "lcm_lst_descendants",
+    "description": (
+        "Find all symbols transitively called by a given symbol (up to N hops). "
+        "Uses networkx graph traversal on the in-memory codebase graph. "
+        "Requires networkx: pip install networkx. "
+        "Use this to understand the full dependency footprint of a function."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "symbol_name": {
+                "type": "string",
+                "description": "Symbol to find descendants of.",
+            },
+            "depth": {
+                "type": "integer",
+                "description": "Max number of hops to traverse (default 5).",
+                "default": 5,
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (default 'default').",
+                "default": "default",
+            },
+        },
+        "required": ["symbol_name"],
+    },
+}
+
+LCM_LST_CONTEXT = {
+    "name": "lcm_lst_context",
+    "description": (
+        "Get the full repo orientation context for the current session. "
+        "Returns a compact structural summary: key classes, entry points, most active files, "
+        "recent session history, and available LST tools. "
+        "Call this once at the start of any coding session to orient yourself without "
+        "reading a single file. The context is ~500 tokens and replaces hours of codebase discovery."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (auto-detected if omitted).",
+                "default": "",
+            },
+        },
+        "required": [],
+    },
+}
+
+LCM_READ_FILE = {
+    "name": "lcm_read_file",
+    "description": (
+        "Smart file read with session-level deduplication. "
+        "FIRST read of a file this session: returns full file content and marks it as seen. "
+        "SUBSEQUENT reads of the same file: returns a compact LST structural summary "
+        "(classes, functions, signatures, docstrings) — ~10x fewer tokens, same structural knowledge. "
+        "Use this instead of the native Read tool whenever the file is part of the indexed repo. "
+        "Set force_full=true to always get raw content regardless of session state."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Repo-relative file path (e.g. 'openlcm/core/engine.py').",
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (auto-detected if omitted).",
+                "default": "",
+            },
+            "force_full": {
+                "type": "boolean",
+                "description": "Always return raw file content, even if already seen this session.",
+                "default": False,
+            },
+            "repo_root": {
+                "type": "string",
+                "description": "Override the repo root path for disk reads.",
+                "default": "",
+            },
+        },
+        "required": ["file_path"],
+    },
+}
+
+LCM_LST_FACTS = {
+    "name": "lcm_lst_facts",
+    "description": (
+        "Retrieve all agent discoveries, decisions, and notes pinned to a specific symbol. "
+        "When you store a fact with lcm_remember using the 'symbol' parameter, it gets linked "
+        "to that symbol and surfaces here in future sessions. "
+        "Use this to instantly recall what you previously found about a class or function "
+        "without re-reading the code."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Symbol name to query facts for (e.g. 'LCMEngine', 'compress', 'LCMEngine.compress').",
+            },
+            "repo_id": {
+                "type": "string",
+                "description": "Repo identifier (auto-detected if omitted).",
+                "default": "",
+            },
+        },
+        "required": ["symbol"],
     },
 }

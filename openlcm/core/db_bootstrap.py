@@ -14,7 +14,7 @@ from typing import Iterable, Sequence
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SQLITE_BUSY_TIMEOUT_MS = 30_000
 _MIN_DISK_SPACE_BYTES = 50 * 1024 * 1024
 REQUIRED_CORE_TABLES = (
@@ -25,6 +25,9 @@ REQUIRED_CORE_TABLES = (
     "lcm_migration_state",
     "lcm_facts",
     "lcm_embeddings",
+    "lcm_lst_files",
+    "lcm_lst_symbols",
+    "lcm_lst_edges",
     "messages_fts",
     "nodes_fts",
 )
@@ -477,6 +480,81 @@ def _ensure_embeddings_table(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _ensure_lst_tables(conn: sqlite3.Connection) -> None:
+    """Create Lossless Semantic Tree (LST) tables for codebase graph storage."""
+    # Repos table (added alongside original LST tables — idempotent)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS lcm_lst_repos (
+            repo_id      TEXT PRIMARY KEY,
+            origin_url   TEXT NOT NULL DEFAULT '',
+            branch       TEXT NOT NULL DEFAULT '',
+            commit_hash  TEXT NOT NULL DEFAULT '',
+            local_path   TEXT NOT NULL DEFAULT '',
+            last_scanned REAL NOT NULL DEFAULT 0
+        );
+    """)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS lcm_lst_files (
+            file_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id      TEXT NOT NULL DEFAULT 'default',
+            file_path    TEXT NOT NULL,
+            language     TEXT NOT NULL DEFAULT 'python',
+            file_hash    TEXT NOT NULL DEFAULT '',
+            line_count   INTEGER NOT NULL DEFAULT 0,
+            last_scanned REAL NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_lst_files_repo_path
+            ON lcm_lst_files(repo_id, file_path);
+        CREATE INDEX IF NOT EXISTS idx_lst_files_repo
+            ON lcm_lst_files(repo_id);
+
+        CREATE TABLE IF NOT EXISTS lcm_lst_symbols (
+            symbol_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id          INTEGER NOT NULL REFERENCES lcm_lst_files(file_id) ON DELETE CASCADE,
+            kind             TEXT NOT NULL DEFAULT 'function',
+            name             TEXT NOT NULL DEFAULT '',
+            qualified_name   TEXT NOT NULL DEFAULT '',
+            parent_symbol_id INTEGER,
+            signature        TEXT NOT NULL DEFAULT '',
+            docstring        TEXT NOT NULL DEFAULT '',
+            line_start       INTEGER NOT NULL DEFAULT 0,
+            line_end         INTEGER NOT NULL DEFAULT 0,
+            is_async         INTEGER NOT NULL DEFAULT 0,
+            decorators       TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE INDEX IF NOT EXISTS idx_lst_sym_file   ON lcm_lst_symbols(file_id);
+        CREATE INDEX IF NOT EXISTS idx_lst_sym_name   ON lcm_lst_symbols(name COLLATE NOCASE);
+        CREATE INDEX IF NOT EXISTS idx_lst_sym_qname  ON lcm_lst_symbols(qualified_name);
+        CREATE INDEX IF NOT EXISTS idx_lst_sym_kind   ON lcm_lst_symbols(kind);
+        CREATE INDEX IF NOT EXISTS idx_lst_sym_parent ON lcm_lst_symbols(parent_symbol_id);
+
+        CREATE TABLE IF NOT EXISTS lcm_lst_edges (
+            edge_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_symbol_id INTEGER REFERENCES lcm_lst_symbols(symbol_id) ON DELETE CASCADE,
+            from_file_id   INTEGER NOT NULL REFERENCES lcm_lst_files(file_id) ON DELETE CASCADE,
+            to_symbol_id   INTEGER REFERENCES lcm_lst_symbols(symbol_id) ON DELETE SET NULL,
+            to_file_id     INTEGER REFERENCES lcm_lst_files(file_id) ON DELETE SET NULL,
+            edge_type      TEXT NOT NULL DEFAULT 'calls',
+            to_name        TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_lst_edge_from      ON lcm_lst_edges(from_symbol_id);
+        CREATE INDEX IF NOT EXISTS idx_lst_edge_to        ON lcm_lst_edges(to_symbol_id);
+        CREATE INDEX IF NOT EXISTS idx_lst_edge_type_name ON lcm_lst_edges(edge_type, to_name);
+        CREATE INDEX IF NOT EXISTS idx_lst_edge_from_file ON lcm_lst_edges(from_file_id);
+    """)
+    # FTS5 for fast symbol name / docstring search
+    conn.executescript("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS lcm_lst_symbols_fts USING fts5(
+            name,
+            qualified_name,
+            docstring,
+            signature,
+            content='lcm_lst_symbols',
+            content_rowid='symbol_id'
+        );
+    """)
+
+
 def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     ensure_metadata_table(conn)
     ensure_migration_state_table(conn)
@@ -508,5 +586,10 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     if current_version < 6:
         mark_migration_step_complete(conn, "v6_fact_graph_embeddings")
         current_version = 6
+
+    _ensure_lst_tables(conn)
+    if current_version < 7:
+        mark_migration_step_complete(conn, "v7_lossless_semantic_tree")
+        current_version = 7
 
     set_schema_version(conn, current_version)

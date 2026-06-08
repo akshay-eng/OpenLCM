@@ -411,6 +411,56 @@ def create_app(engine=None, bus=None):
             bus.publish("fact_deleted", {"key": key, "scope": scope})
         return JSONResponse({"deleted": deleted})
 
+    # ── LST (Lossless Semantic Tree) API ─────────────────────────────────────
+
+    @app.get("/api/lst/stats")
+    async def api_lst_stats():
+        lst = getattr(engine, "_lst", None) if engine else None
+        if lst is None:
+            return JSONResponse({"available": False, "hint": "Attach an LSTGraph via engine.attach_lst() or set LCM_LST_ENABLED=true"})
+        try:
+            stats = lst.get_stats()
+            return JSONResponse({"available": True, **stats})
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    @app.get("/api/lst/files")
+    async def api_lst_files(repo_id: str = "default", limit: int = 500):
+        lst = getattr(engine, "_lst", None) if engine else None
+        if lst is None:
+            return JSONResponse({"available": False, "files": []})
+        try:
+            files = lst.list_files(repo_id=repo_id, limit=min(limit, 2000))
+            return JSONResponse({"available": True, "total": len(files), "files": files})
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    @app.get("/api/lst/symbols")
+    async def api_lst_symbols(file: str = "", repo_id: str = "default"):
+        lst = getattr(engine, "_lst", None) if engine else None
+        if lst is None:
+            return JSONResponse({"available": False, "symbols": []})
+        if not file:
+            return JSONResponse({"error": "file query param required"}, status_code=400)
+        try:
+            symbols = lst.get_file_symbols(file, repo_id=repo_id)
+            return JSONResponse({"file": file, "total": len(symbols), "symbols": symbols})
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    @app.get("/api/lst/search")
+    async def api_lst_search(q: str = "", kind: str = "", repo_id: str = "default", limit: int = 20):
+        lst = getattr(engine, "_lst", None) if engine else None
+        if lst is None:
+            return JSONResponse({"available": False, "results": []})
+        if not q:
+            return JSONResponse({"error": "q query param required"}, status_code=400)
+        try:
+            results = lst.find_symbol(q, kind=kind or None, limit=min(limit, 100))
+            return JSONResponse({"query": q, "total": len(results), "results": results})
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
     # ── Static files ──────────────────────────────────────────────────────────
 
     if _STATIC_DIR.exists():

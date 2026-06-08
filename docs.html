@@ -238,6 +238,14 @@
     </div>
     <hr class="toc-hr" />
     <div class="sb-group">
+      <span class="sb-group-label">codebase intelligence</span>
+      <a href="#lst"         class="sb-link"><div class="sb-dot" style="background:#4A90D9"></div>LST — code graph</a>
+      <a href="#lst-session" class="sb-link"><div class="sb-dot" style="background:#4A90D9"></div>session context</a>
+      <a href="#lst-viz"     class="sb-link"><div class="sb-dot" style="background:#4A90D9"></div>visualize graph</a>
+      <a href="#benchmarks"  class="sb-link"><div class="sb-dot" style="background:#27AE60"></div>benchmarks</a>
+    </div>
+    <hr class="toc-hr" />
+    <div class="sb-group">
       <span class="sb-group-label">for ai agents</span>
       <a href="#agent-prompt" class="sb-link" style="color:var(--green)"><div class="sb-dot" style="background:var(--green)"></div>copy agent prompt ↗</a>
     </div>
@@ -1380,6 +1388,236 @@ openlcm expand NODE_ID [--session SESSION_ID]</div>
       </div>
     </section>
 
+    <!-- ══════════════ LST — CODEBASE GRAPH ══════════════ -->
+    <section class="doc-section" id="lst">
+      <span class="sec-label">codebase intelligence</span>
+      <h2 class="sec-title">LST — Lossless Semantic Tree</h2>
+      <p class="sec-lead">Parse a repository once (AST → semantic graph) and store it in the same SQLite database. Agents query the graph instead of reading files — so the codebase never needs to live in the context window.</p>
+
+      <div class="callout tip">
+        <strong>Core idea</strong>
+        Without LST, an agent reads 30 files on turn 1, half scroll out by turn 10, and it re-reads on turn 11 — burning 40K tokens just staying oriented. With LST, <code>lcm_lst_find("PaymentService")</code> returns signatures + docstrings in ~200 tokens. One query. No re-discovery.
+      </div>
+
+      <h3 class="sub-title">Scan a repo</h3>
+      <div class="cb"><div class="cb-head"><span class="cb-title">CLI — scan and query</span><span class="cb-lang">bash</span></div>
+        <div class="cb-body"><span class="cmt"># Scan a local repo</span>
+openlcm scan repo /path/to/myapp
+
+<span class="cmt"># Scan a GitHub repo (auto-clones to ~/.openlcm/repos/)</span>
+openlcm scan repo https://github.com/fastapi/fastapi
+
+<span class="cmt"># Check what was indexed</span>
+openlcm scan status
+
+<span class="cmt"># Export portable graph (share between machines / agents)</span>
+openlcm scan export myapp.lcmgraph
+openlcm scan import myapp.lcmgraph</div>
+      </div>
+
+      <div class="cb"><div class="cb-head"><span class="cb-title">Python SDK</span><span class="cb-lang">python</span></div>
+        <div class="cb-body"><span class="kw">from</span> <span class="imp">openlcm.code.graph</span> <span class="kw">import</span> <span class="cls">LSTGraph</span>
+<span class="kw">from</span> <span class="imp">openlcm.code.scanner</span> <span class="kw">import</span> <span class="cls">RepoScanner</span>
+
+graph   = <span class="cls">LSTGraph</span>(<span class="str">"myapp.db"</span>)
+scanner = <span class="cls">RepoScanner</span>()
+
+<span class="cmt"># Incremental scan — only re-parses changed files</span>
+scanner.scan(<span class="str">"/path/to/repo"</span>, graph, repo_id=<span class="str">"myapp"</span>)
+<span class="cmt"># or scan a remote URL</span>
+scanner.scan(<span class="str">"https://github.com/user/repo"</span>, graph)
+
+<span class="cmt"># Query the graph</span>
+graph.find_symbol(<span class="str">"PaymentService"</span>)
+graph.get_class(<span class="str">"PaymentService"</span>)       <span class="cmt"># class + all methods + docstrings</span>
+graph.get_callers(<span class="str">"charge"</span>)              <span class="cmt"># who calls this function</span>
+graph.get_callees(<span class="str">"process_payment"</span>)     <span class="cmt"># what this function calls</span>
+graph.get_file_symbols(<span class="str">"payments/service.py"</span>)</div>
+      </div>
+
+      <h3 class="sub-title">LST Agent Tools (13 tools)</h3>
+      <table class="param-table">
+        <thead><tr><th>Tool</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>lcm_lst_scan</code></td><td>Scan a repo path or URL, populate the graph (incremental)</td></tr>
+          <tr><td><code>lcm_lst_find</code></td><td>FTS5 search — find any symbol by name, kind, or file</td></tr>
+          <tr><td><code>lcm_lst_file</code></td><td>All symbols in a file (classes, functions, imports)</td></tr>
+          <tr><td><code>lcm_lst_class</code></td><td>Class definition + all methods + signatures + linked facts</td></tr>
+          <tr><td><code>lcm_lst_callers</code></td><td>Who calls a function (call-graph inbound edges)</td></tr>
+          <tr><td><code>lcm_lst_callees</code></td><td>What a function calls (call-graph outbound edges)</td></tr>
+          <tr><td><code>lcm_lst_refs</code></td><td>All edge references to a symbol name</td></tr>
+          <tr><td><code>lcm_lst_path</code></td><td>Shortest dependency path between two symbols (networkx)</td></tr>
+          <tr><td><code>lcm_lst_ancestors</code></td><td>All symbols that transitively call a function</td></tr>
+          <tr><td><code>lcm_lst_descendants</code></td><td>Full dependency footprint of a function</td></tr>
+          <tr><td><code>lcm_lst_context</code></td><td>Full repo orientation block — call once at session start</td></tr>
+          <tr><td><code>lcm_read_file</code></td><td>Smart file read: full content first time, compact LST view on repeats</td></tr>
+          <tr><td><code>lcm_lst_facts</code></td><td>Retrieve all agent discoveries pinned to a symbol</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="sub-title">Multi-language support</h3>
+      <p>Python files use the stdlib <code>ast</code> module (rich: docstrings, call edges, full signatures). All other languages use <a href="https://ctags.io" target="_blank">Universal Ctags</a> as a subprocess — 100+ languages including TypeScript, Go, Java, Rust, Ruby, C/C++, PHP, Swift, Kotlin.</p>
+      <div class="cb"><div class="cb-head"><span class="cb-title">install ctags</span><span class="cb-lang">bash</span></div>
+        <div class="cb-body">brew install universal-ctags        <span class="cmt"># macOS</span>
+sudo apt install universal-ctags    <span class="cmt"># Ubuntu / Debian</span>
+scoop install universal-ctags       <span class="cmt"># Windows</span></div>
+      </div>
+    </section>
+
+    <!-- ══════════════ LST SESSION CONTEXT ══════════════ -->
+    <section class="doc-section" id="lst-session">
+      <span class="sec-label">codebase intelligence</span>
+      <h2 class="sec-title">Session Context &amp; No Re-discovery</h2>
+      <p class="sec-lead">Three mechanisms that ensure agents never re-discover the codebase and never lose structural knowledge across sessions or context pressure.</p>
+
+      <h3 class="sub-title">1 — Boot context injection</h3>
+      <p>At session start, inject a ~500-token structural summary into your system prompt. The agent immediately knows key classes, entry points, and recent session history — without reading a single file.</p>
+      <div class="cb"><div class="cb-head"><span class="cb-title">session boot</span><span class="cb-lang">python</span></div>
+        <div class="cb-body">engine.bind_session(session_id, context_length=<span class="num">200_000</span>)
+
+<span class="cmt"># Get the orientation block — inject into system prompt</span>
+ctx = engine.get_lst_context()
+system_prompt = f<span class="str">"You are a coding agent.\n\n{ctx}"</span>
+
+<span class="cmt"># Auto-inject mode: add to every compress() call automatically</span>
+<span class="cmt"># LCM_LST_AUTO_INJECT=true  (or config.lst_auto_inject = True)</span></div>
+      </div>
+
+      <p>The orientation block contains: repo stats, key classes with docstrings, entry-point functions, most active files, recent session history from the DAG, and tool hints.</p>
+
+      <h3 class="sub-title">2 — Smart file reads (dedup)</h3>
+      <p>Use <code>lcm_read_file</code> instead of the native Read tool. First read returns full content; every subsequent read of the same file in the same session returns a compact LST structural summary (~200 tokens vs ~3000).</p>
+      <div class="cb"><div class="cb-head"><span class="cb-title">file read deduplication</span><span class="cb-lang">python</span></div>
+        <div class="cb-body"><span class="cmt"># Turn 5 — first read → full file content returned</span>
+result = engine.get_file_context(<span class="str">"payments/service.py"</span>)
+<span class="cmt"># result["mode"] == "full"</span>
+
+<span class="cmt"># Turn 30 — same file → compact LST view (~200 tokens)</span>
+result = engine.get_file_context(<span class="str">"payments/service.py"</span>)
+<span class="cmt"># result["mode"] == "compact"</span>
+<span class="cmt"># Contains: class PaymentService (:12), def charge(amount, currency) (:45) — ...</span>
+
+<span class="cmt"># Track files seen after native reads</span>
+engine.mark_file_seen(<span class="str">"payments/service.py"</span>)
+engine.get_session_files_read()  <span class="cmt"># set of all files read this session</span>
+
+<span class="cmt"># Force full content even if already seen</span>
+result = engine.get_file_context(<span class="str">"payments/service.py"</span>, force_full=<span class="kw">True</span>)</div>
+      </div>
+
+      <h3 class="sub-title">3 — Symbol-pinned facts</h3>
+      <p>Pin agent discoveries to specific symbols so they surface automatically in future sessions when those symbols are queried.</p>
+      <div class="cb"><div class="cb-head"><span class="cb-title">fact → symbol linking</span><span class="cb-lang">python</span></div>
+        <div class="cb-body"><span class="cmt"># Pin a discovery to a symbol</span>
+engine.handle_tool_call(<span class="str">"lcm_remember"</span>, {
+    <span class="str">"key"</span>:      <span class="str">"payments.charge.rate_limit"</span>,
+    <span class="str">"value"</span>:    <span class="str">"Stripe rate limit hit at 100 req/s — add backoff"</span>,
+    <span class="str">"symbol"</span>:   <span class="str">"PaymentService.charge"</span>,
+    <span class="str">"category"</span>: <span class="str">"constraint"</span>,
+})
+
+<span class="cmt"># Next session — surfaces automatically when class is queried</span>
+result = engine.handle_tool_call(<span class="str">"lcm_lst_class"</span>, {<span class="str">"class_name"</span>: <span class="str">"PaymentService"</span>})
+<span class="cmt"># result["pinned_facts"] = [{"key": "payments.charge.rate_limit", ...}]</span>
+
+<span class="cmt"># Query all facts pinned to a symbol directly</span>
+engine.handle_tool_call(<span class="str">"lcm_lst_facts"</span>, {<span class="str">"symbol"</span>: <span class="str">"PaymentService.charge"</span>})</div>
+      </div>
+
+      <h3 class="sub-title">Zero-config setup via env vars</h3>
+      <div class="cb"><div class="cb-head"><span class="cb-title">.env</span><span class="cb-lang">bash</span></div>
+        <div class="cb-body">LCM_LST_ENABLED=true
+LCM_LST_REPO_PATH=/path/to/repo
+LCM_LST_REPO_ID=myapp        <span class="cmt"># optional, defaults to "default"</span>
+LCM_LST_AUTO_INJECT=true     <span class="cmt"># inject repo context into every compress() call</span></div>
+      </div>
+    </section>
+
+    <!-- ══════════════ LST VISUALIZER ══════════════ -->
+    <section class="doc-section" id="lst-viz">
+      <span class="sec-label">codebase intelligence</span>
+      <h2 class="sec-title">Code Graph Visualizer</h2>
+      <p class="sec-lead">Generate an interactive HTML force-directed graph of the codebase — all files, classes, functions, and edges. Canvas-rendered for smooth zoom/pan at any scale.</p>
+
+      <div class="cb"><div class="cb-head"><span class="cb-title">visualize</span><span class="cb-lang">bash</span></div>
+        <div class="cb-body"><span class="cmt"># Generate HTML and open in browser (default)</span>
+openlcm scan visualize
+
+<span class="cmt"># Rich tree view in terminal</span>
+openlcm scan visualize --terminal
+
+<span class="cmt"># Specific repo or output path</span>
+openlcm scan visualize --repo-id myapp --output myapp_graph.html
+
+<span class="cmt"># Tune for large repos</span>
+openlcm scan visualize --max-symbols 500 --max-edges 1000</div>
+      </div>
+
+      <p>The HTML graph includes: node type legend with toggle filters, edge type toggles (calls / imports / inherits), hover tooltips with signatures and docstrings, click-to-highlight connected nodes, detail panel with callers/callees, sidebar node list with search, and fit/reset controls. Powered by D3.js force simulation with Canvas rendering.</p>
+
+      <div class="cb"><div class="cb-head"><span class="cb-title">Python API</span><span class="cb-lang">python</span></div>
+        <div class="cb-body"><span class="kw">from</span> <span class="imp">openlcm.code.visualize</span> <span class="kw">import</span> <span class="fn">build_graph_data</span>, <span class="fn">render_html</span>, <span class="fn">render_terminal</span>
+
+data = build_graph_data(graph, repo_id=<span class="str">"myapp"</span>, max_symbols=<span class="num">2000</span>)
+render_html(data, <span class="str">"myapp_graph.html"</span>)
+render_terminal(graph, repo_id=<span class="str">"myapp"</span>)</div>
+      </div>
+    </section>
+
+    <!-- ══════════════ BENCHMARKS ══════════════ -->
+    <section class="doc-section" id="benchmarks">
+      <span class="sec-label">evaluation</span>
+      <h2 class="sec-title">Benchmarks</h2>
+      <p class="sec-lead">Standalone scripts that measure OpenLCM compression quality against established memory benchmarks. Run them to see the improvement over naive truncation.</p>
+
+      <table class="param-table">
+        <thead><tr><th>Benchmark</th><th>What it tests</th><th>Key metric</th></tr></thead>
+        <tbody>
+          <tr><td><a href="https://arxiv.org/abs/2402.13605" target="_blank">LoCoMo</a></td><td>Single-session long-context retention — can the agent answer questions about turn 5 when on turn 200?</td><td>Token F1, Exact Match, ROUGE-L</td></tr>
+          <tr><td><a href="https://arxiv.org/abs/2410.10813" target="_blank">LongMemEval</a></td><td>Multi-session cross-session memory — can the agent connect facts from session 1 and session 4?</td><td>F1 by question type: cross_session, knowledge_update, temporal</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="sub-title">Run</h3>
+      <div class="cb"><div class="cb-head"><span class="cb-title">benchmark commands</span><span class="cb-lang">bash</span></div>
+        <div class="cb-body">pip install openlcm datasets litellm
+export ANTHROPIC_API_KEY=sk-ant-...
+
+<span class="cmt"># Single benchmark</span>
+python benchmarks/run_locomo.py \
+    --model anthropic/claude-haiku-4-5-20251001 \
+    --limit 50
+
+python benchmarks/run_longmemeval.py \
+    --model anthropic/claude-haiku-4-5-20251001 \
+    --limit 50
+
+<span class="cmt"># Both benchmarks, combined summary</span>
+python benchmarks/run_all.py \
+    --model anthropic/claude-haiku-4-5-20251001 \
+    --limit 50</div>
+      </div>
+
+      <h3 class="sub-title">Expected output</h3>
+      <div class="cb"><div class="cb-head"><span class="cb-title">results</span><span class="cb-lang">text</span></div>
+        <div class="cb-body">──────────────────────────────────────────────────────────
+  LoCoMo Results
+──────────────────────────────────────────────────────────
+  Metric              truncate       openlcm
+  ────────────────────────────────────────────────────────
+  Exact Match         0.2341    0.3812 (+0.147)
+  Token F1            0.3102    0.4891 (+0.179)
+  ROUGE-L             0.2987    0.4654 (+0.167)
+
+  LongMemEval — breakdown by question type
+  ──────────────────────────────────────────────────────────
+  Type                     F1@truncate    F1@openlcm
+  cross_session                 0.1230        0.4102
+  knowledge_update              0.1560        0.4230
+  single_session_user           0.4210        0.5831</div>
+      </div>
+    </section>
+
     <!-- ══════════════ API REFERENCE ══════════════ -->
     <section class="doc-section" id="api">
       <span class="sec-label">reference</span>
@@ -1608,27 +1846,32 @@ if engine.should_compress_preflight(lcm):
     _, history[:] = GeminiMessages.from_lcm(lcm)  # returns (system_str, contents)
 
 
-<span class="ap-h2">## AGENT TOOLS — ALL AVAILABLE TOOLS</span>
+<span class="ap-h2">## AGENT TOOLS — ALL 26 AVAILABLE TOOLS</span>
 
-The engine exposes these tools for agents to call.
-Include them via engine.get_tool_schemas() for your framework's tool list.
-Route tool calls to: result = await engine.handle_tool_call(tool_name, args_dict)
+Include all tools via engine.get_tool_schemas() and route calls to:
+  result = engine.handle_tool_call(tool_name, args_dict, messages=messages)
+
+─────────────────────────────────────────────
+<span class="ap-h3">MEMORY TOOLS</span>
+─────────────────────────────────────────────
 
 <span class="ap-h3">lcm_remember — store a persistent fact</span>
 Parameters:
-  key        (str, required)   dot-notation key e.g. "user.timezone", "decision.database"
-  value      (str, required)   the value to store
-  category   (str, optional)   "fact" | "preference" | "constraint" | "decision"  default: "fact"
-  scope      (str, optional)   "global" (all sessions) | "current" (this session only)  default: "global"
-  tags       (list, optional)  topic strings e.g. ["auth", "backend"] — preserved on update if omitted
-  related_keys (list, optional) keys of related facts for graph linking
+  key          (str, required)   dot-notation key e.g. "user.timezone", "decision.database"
+  value        (str, required)   the value to store
+  category     (str, optional)   "fact" | "preference" | "constraint" | "decision"  default: "fact"
+  scope        (str, optional)   "global" (all sessions) | "current" (this session only)  default: "global"
+  tags         (list, optional)  topic strings e.g. ["auth", "backend"]
+  related_keys (list, optional)  keys of related facts for graph linking
+  symbol       (str, optional)   ★ NEW — pin this fact to a code symbol e.g. "PaymentService.charge"
+                                   Fact surfaces automatically when that symbol is queried via lcm_lst_class
+  repo_id      (str, optional)   repo the symbol belongs to (auto-detected)
 
-Returns: {"status": "stored", "key": ..., "value": ..., "fact_id": ...}
-If fact existed and value changed substantially, also returns: {"updated": true, "previous_value": "..."}
+Returns: {"status": "stored", "key": ..., "fact_id": ..., "symbol_pinned": "..."}
 
-Best practice: call this whenever the user confirms a decision, states a constraint,
-or expresses a preference. Use dot-notation keys: decision.database, constraint.budget,
-preference.code_style, user.timezone
+Best practice: whenever you discover something about the code, call lcm_remember
+with symbol= to pin it. It will survive across sessions and surface when that
+symbol is next queried — no re-discovery.
 
 <span class="ap-h3">lcm_recall — retrieve persistent facts</span>
 Parameters:
@@ -1639,98 +1882,181 @@ Parameters:
   tag        (str, optional)  filter by tag — returns all facts with this tag
   related_to (str, optional)  traverse fact graph — returns facts linked to this key
 
-Returns: list of matching facts with all fields
+<span class="ap-h3">lcm_forget</span> — delete a fact  (key required)
+<span class="ap-h3">lcm_link</span>   — bidirectionally link two facts  (key1, key2 required)
 
-Best practice: call lcm_recall() with no args at the start of every new session
-to re-load preferences and constraints. Call lcm_recall(category="constraint") before
-any tool call that modifies state.
-
-<span class="ap-h3">lcm_forget — delete a fact</span>
-Parameters:
-  key   (str, required)
-  scope (str, optional) default: "global"
-
-Returns: {"deleted": true|false, "key": ...}
-
-<span class="ap-h3">lcm_link — bidirectionally link two facts</span>
-Parameters:
-  key1  (str, required)
-  key2  (str, required)
-  scope (str, optional) default: "global"
-
-Returns: {"linked": true|false, "key1": ..., "key2": ...}
-Creates key2 in key1.related_keys and key1 in key2.related_keys.
-Use to capture causal chains: link decision.database to constraint.no_external_db
+─────────────────────────────────────────────
+<span class="ap-h3">HISTORY TOOLS</span>
+─────────────────────────────────────────────
 
 <span class="ap-h3">lcm_grep — full-text search across message history</span>
 Parameters:
-  query      (str, required)  FTS5 search term
-  session_id (str, optional)  limit to a session
+  query      (str, required)
+  session_id (str, optional)
   limit      (int, optional)  default 20
-
-Returns: list of matching messages with store_id, role, content snippet, token_estimate
 
 <span class="ap-h3">lcm_expand — recover original messages from a DAG node</span>
 Parameters:
   node_id    (int, required)
   max_tokens (int, optional) default 4000
 
-Returns: full text of original messages that were compressed into this node
-
 <span class="ap-h3">lcm_expand_query — synthesize answer from compressed history</span>
 Parameters:
-  query      (str, required)  what to look for
+  query      (str, required)
   session_id (str, optional)
   max_tokens (int, optional) default 4000
 
-Returns: synthesized answer drawing from DAG nodes that match the query
-
-<span class="ap-h3">lcm_semantic_search — vector similarity search (requires LCM_EMBEDDING_MODEL)</span>
+<span class="ap-h3">lcm_semantic_search — cosine similarity search (requires LCM_EMBEDDING_MODEL)</span>
 Parameters:
   query        (str, required)
   limit        (int, optional) default 10
   content_type (str, optional) "node" | "fact" | "all"  default: "all"
 
-Returns: cosine-ranked hits enriched with summary text or fact values.
-If LCM_EMBEDDING_MODEL is not set, returns a hint to use lcm_grep instead.
+─────────────────────────────────────────────
+<span class="ap-h3">CODEBASE GRAPH TOOLS (LST)</span>
+─────────────────────────────────────────────
+Requires: openlcm scan repo &lt;path&gt;  (run once, persists in SQLite)
+
+<span class="ap-h3">lcm_lst_context ★ — get full repo orientation (call FIRST in any coding session)</span>
+Parameters:
+  repo_id (str, optional)
+
+Returns: compact repo summary — key classes, entry points, active files, recent
+session history, tool hints. ~500 tokens. Replaces hours of codebase discovery.
+
+<span class="ap-h3">lcm_read_file ★ — smart file read with session deduplication</span>
+Parameters:
+  file_path  (str, required)  repo-relative path e.g. "openlcm/core/engine.py"
+  force_full (bool, optional) always return raw content  default: false
+  repo_root  (str, optional)  override repo root for disk reads
+
+FIRST read this session: returns full file content, marks file as seen.
+REPEAT read this session: returns compact LST structural summary (~200 tokens).
+Use this instead of the native Read tool for indexed files.
+
+<span class="ap-h3">lcm_lst_find — find any symbol by name</span>
+Parameters:
+  name    (str, required)
+  kind    (str, optional)  "class" | "function" | "method" | "import"
+  file    (str, optional)  restrict to a specific file
+  limit   (int, optional)  default 10
+
+<span class="ap-h3">lcm_lst_class — get class definition + all methods + linked facts</span>
+Parameters:
+  class_name (str, required)  simple name e.g. "PaymentService"
+  repo_id    (str, optional)
+
+Returns: class info, all methods with signatures, docstrings, and any facts
+previously pinned to this class via lcm_remember(symbol="ClassName").
+
+<span class="ap-h3">lcm_lst_file — all symbols in a file</span>
+Parameters:
+  file_path (str, required)
+  repo_id   (str, optional)
+
+<span class="ap-h3">lcm_lst_callers — who calls a function</span>
+Parameters:
+  function_name (str, required)
+  limit         (int, optional) default 20
+
+<span class="ap-h3">lcm_lst_callees — what a function calls</span>
+Parameters:
+  function_name (str, required)
+  limit         (int, optional) default 20
+
+<span class="ap-h3">lcm_lst_refs — all edge references to a symbol</span>
+Parameters:
+  symbol_name (str, required)
+  limit       (int, optional) default 30
+
+<span class="ap-h3">lcm_lst_path — shortest dependency path between two symbols (requires networkx)</span>
+Parameters:
+  from_name (str, required)
+  to_name   (str, required)
+  repo_id   (str, optional)
+
+<span class="ap-h3">lcm_lst_ancestors — all symbols that transitively call a function</span>
+Parameters:
+  symbol_name (str, required)
+  depth       (int, optional) default 5, max 10
+  repo_id     (str, optional)
+
+<span class="ap-h3">lcm_lst_descendants — full dependency footprint of a function</span>
+Parameters:
+  symbol_name (str, required)
+  depth       (int, optional) default 5, max 10
+  repo_id     (str, optional)
+
+<span class="ap-h3">lcm_lst_facts ★ — all agent discoveries pinned to a symbol</span>
+Parameters:
+  symbol  (str, required)  e.g. "LCMEngine", "compress", "PaymentService.charge"
+  repo_id (str, optional)
+
+Returns: all facts previously stored with lcm_remember(symbol=...) for this symbol.
+Use at session start instead of re-reading code you already analyzed.
+
+<span class="ap-h3">lcm_lst_scan — scan or re-scan a repository</span>
+Parameters:
+  repo_path (str, required)  local path or remote URL
+  repo_id   (str, optional)  default "default"
+  force     (bool, optional) re-parse all files  default: false
 
 
 <span class="ap-h2">## ENVIRONMENT VARIABLES</span>
 
-<span class="ap-key">LCM_CONTEXT_THRESHOLD</span>       float   0.75   Compression trigger as fraction of context window
-<span class="ap-key">LCM_FRESH_TAIL_COUNT</span>         int     64     Messages protected from compression at tail
-<span class="ap-key">LCM_LEAF_CHUNK_TOKENS</span>        int     20000  Tokens per D0 leaf summary node
-<span class="ap-key">LCM_CONDENSATION_FANIN</span>       int     4      D0 nodes before D1 arc is created
-<span class="ap-key">LCM_DB_PATH</span>                  str     ~/.openlcm/lcm.db  SQLite database path
-<span class="ap-key">LCM_AUTO_INJECT_MEMORY</span>       bool    false  Auto-inject relevant facts before each compression
-<span class="ap-key">LCM_AUTO_INJECT_TOP_K</span>        int     5      Max facts injected per compression call
-<span class="ap-key">LCM_EXTRACTION_TO_FACTS_ENABLED</span> bool false  Auto-extract facts from each D0 summary node
-<span class="ap-key">LCM_AUTO_PIN_PATTERNS</span>        str     ""     Pattern groups: constraint,error,correction
-<span class="ap-key">LCM_EMBEDDING_MODEL</span>          str     ""     LiteLLM model for embeddings (enables lcm_semantic_search)
+<span class="ap-h3">Context compression</span>
+<span class="ap-key">LCM_CONTEXT_THRESHOLD</span>           float   0.75     Compress at this fraction of context window
+<span class="ap-key">LCM_FRESH_TAIL_COUNT</span>            int     64       Messages protected from compression at tail
+<span class="ap-key">LCM_LEAF_CHUNK_TOKENS</span>           int     20000    Tokens per D0 leaf summary node
+<span class="ap-key">LCM_CONDENSATION_FANIN</span>          int     4        D0 nodes before D1 arc
+<span class="ap-key">LCM_DB_PATH</span>                     str     ~/.openlcm/lcm.db   SQLite database path
+
+<span class="ap-h3">Memory</span>
+<span class="ap-key">LCM_AUTO_INJECT_MEMORY</span>          bool    false    Auto-inject relevant facts before each compression
+<span class="ap-key">LCM_AUTO_INJECT_TOP_K</span>           int     5        Max facts injected per compression
+<span class="ap-key">LCM_EXTRACTION_TO_FACTS_ENABLED</span> bool    false    Auto-extract facts from each D0 summary node
+<span class="ap-key">LCM_AUTO_PIN_PATTERNS</span>           str     ""       Pattern groups: constraint,error,correction
+<span class="ap-key">LCM_EMBEDDING_MODEL</span>             str     ""       LiteLLM model for embeddings (lcm_semantic_search)
+
+<span class="ap-h3">Codebase graph (LST)</span>
+<span class="ap-key">LCM_LST_ENABLED</span>                 bool    false    Auto-scan repo on engine init
+<span class="ap-key">LCM_LST_REPO_PATH</span>               str     ""       Path to scan (required when LST_ENABLED=true)
+<span class="ap-key">LCM_LST_REPO_ID</span>                 str     default  Logical repo identifier
+<span class="ap-key">LCM_LST_AUTO_INJECT</span>             bool    true     Inject repo context into every compress() call
 
 
 <span class="ap-h2">## SYSTEM PROMPT BEST PRACTICES</span>
 
-Add the following instructions to your agent's system prompt:
+Add the following to your agent's system prompt:
 
 ---
-At the start of every session, call lcm_recall() to load all persistent facts,
-preferences, and constraints. Never ask the user to repeat information that
-may already be stored.
+CONTEXT MANAGEMENT:
+At the start of every session, call:
+  1. lcm_recall() — reload all persistent facts, constraints, and preferences
+  2. lcm_lst_context() — get full repo orientation (if working with code)
+Never ask the user to repeat information that may already be stored.
 
-Whenever the user confirms a decision, states a hard constraint, or expresses
-a preference — immediately call lcm_remember with the appropriate category.
+CODING SESSIONS:
+Use lcm_read_file instead of the native Read tool for all indexed files.
+First read returns full content; repeat reads return compact structural summary.
+After reading a file, use lcm_lst_class / lcm_lst_callers instead of re-reading
+to understand relationships.
+
+When you discover something important about the code (a bug, a pattern, a constraint):
+  lcm_remember(key="...", value="...", symbol="ClassName.method", category="constraint")
+This pins the discovery to the symbol — it will surface automatically next session.
+
+MEMORY:
+Whenever the user confirms a decision, states a constraint, or expresses a
+preference — immediately call lcm_remember with the appropriate category.
 Use dot-notation keys: decision.database, constraint.no_prod_push, preference.language.
 
-Before any tool call that modifies state (writes to DB, deploys, sends messages),
+Before any state-modifying tool call (writes to DB, deploys, sends messages),
 call lcm_recall(category="constraint") to check for standing constraints.
 
-When two decisions are causally related, call lcm_link to connect them.
-Add topic tags to every stored fact for easier retrieval.
-
-If you need to recall something from earlier in this conversation that may have
-been compressed, call lcm_grep with a keyword or lcm_expand with the node ID
-shown in the summary header. Never guess at something that can be looked up.
+If you need to recall something from earlier that may have been compressed,
+call lcm_grep with a keyword or lcm_expand_query with a description.
+Never guess at something that can be looked up.
 ---
 
 
