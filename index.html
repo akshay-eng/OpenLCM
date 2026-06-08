@@ -7,6 +7,8 @@
   <meta name="description" content="Framework-agnostic Lossless Context Management SDK for AI agents. Nothing is ever lost." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="apple-touch-icon" href="logo_nav.png" />
   <style>
     :root {
       --bg:        #0C0C0C; --bg-2:#141414; --bg-3:#1C1C1C; --bg-4:#242424;
@@ -646,7 +648,10 @@
 
 <nav>
   <div class="nav-inner">
-    <span class="nav-prompt">◆ OpenLCM</span>
+    <a href="#" style="display:flex;align-items:center;gap:9px;text-decoration:none">
+      <img src="logo_nav.png" alt="OpenLCM" style="width:28px;height:28px;object-fit:contain;image-rendering:pixelated" />
+      <span class="nav-prompt">OpenLCM</span>
+    </a>
     <ul class="nav-links">
       <li><a href="#problem">problem</a></li>
       <li><a href="#demo">demo</a></li>
@@ -667,6 +672,9 @@
   <div class="wrap">
     <div class="hero-inner">
       <div>
+        <div class="reveal" style="margin-bottom:20px">
+          <img src="logo_clean.png" alt="OpenLCM seahorse mascot" style="width:88px;height:88px;object-fit:contain;image-rendering:pixelated;filter:drop-shadow(0 0 16px rgba(74,222,128,0.25))" />
+        </div>
         <div class="hero-label reveal">framework-agnostic lossless context management</div>
         <h1 class="hero-title reveal r1"><span class="t-green">Unbounded</span><br/>Memory.<br/><span class="t-dim">Bounded</span><br/>Context.</h1>
         <p class="hero-tagline reveal r2">OpenLCM is a <span class="hl">drop-in Python SDK</span> that gives your AI agents a permanent, searchable, lossless memory — without hitting the context limit. Works with <span class="hl">LangGraph</span>, <span class="hl">CrewAI</span>, <span class="hl">AutoGen</span>, <span class="hl">Google ADK</span> and any Python framework.</p>
@@ -1455,7 +1463,10 @@ ctx = engine.get_lst_context()
 
 <footer>
   <div class="footer-inner">
-    <div class="footer-logo">◆ Open<span class="fl-g">LCM</span></div>
+    <div class="footer-logo" style="display:flex;align-items:center;gap:8px">
+      <img src="logo_nav.png" alt="OpenLCM" style="width:22px;height:22px;object-fit:contain;image-rendering:pixelated;opacity:.85" />
+      Open<span class="fl-g">LCM</span>
+    </div>
     <div class="footer-links">
       <a href="https://github.com/akshay-eng/OpenLCM" target="_blank" rel="noopener">github</a>
       <a href="docs.html">docs</a>
